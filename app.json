@@ -32,10 +32,6 @@
     "MONGO_URL": {
       "description": "MongoDB connection URL for persistent storage (optional, uses in-memory if not provided)",
       "required": false
-    },
-    "WEBHOOK_DOMAIN": {
-      "description": "Your Heroku app name for webhook (e.g., my-bot-app)",
-      "required": true
     }
   },
   "buildpacks": [
