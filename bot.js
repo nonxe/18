@@ -47,160 +47,168 @@ async function initMongo() {
   }
 }
 
-async function fetchExistingVideos() {
-  console.log('Fetching existing videos from source channel...');
+// Ye function channel ke saare purane videos fetch karega
+async function fetchAllChannelVideos() {
+  console.log('🔍 Fetching all videos from source channel...');
   
   try {
-    let offset = 0;
-    let fetchedCount = 0;
-    const limit = 100;
-    const newVideos = [];
+    let foundVideos = [];
+    let offsetId = 0;
+    let attempts = 0;
+    const maxAttempts = 50; // Max 5000 messages check karenge (50 * 100)
     
-    while (true) {
+    while (attempts < maxAttempts) {
       try {
-        const updates = await bot.telegram.getUpdates({
-          offset: offset,
-          limit: limit,
-          timeout: 0
-        });
+        // Channel se messages fetch karo - requires bot to be admin
+        const messages = await bot.telegram.callApi('getChat', {
+          chat_id: SOURCE_CHANNEL_ID
+        }).catch(() => null);
         
-        if (updates.length === 0) break;
+        // Try different approach - iterate through message IDs
+        let foundInBatch = 0;
+        const batchSize = 100;
+        const startId = offsetId + 1;
+        const endId = startId + batchSize;
         
-        for (const update of updates) {
-          if (update.channel_post && 
-              update.channel_post.chat.id.toString() === SOURCE_CHANNEL_ID.toString() &&
-              update.channel_post.video) {
-            const messageId = update.channel_post.message_id;
-            if (!allVideos.includes(messageId) && !newVideos.includes(messageId)) {
-              newVideos.push(messageId);
-            }
-          }
-          offset = update.update_id + 1;
-        }
+        console.log(`Checking message IDs ${startId} to ${endId}...`);
         
-        if (updates.length < limit) break;
-      } catch (error) {
-        console.log('Reached end of available updates');
-        break;
-      }
-    }
-    
-    // Alternative method: Try to get channel history directly
-    try {
-      let lastMessageId = null;
-      const historyVideos = [];
-      
-      for (let i = 0; i < 10; i++) {
-        const chat = await bot.telegram.getChat(SOURCE_CHANNEL_ID);
-        
-        // Try different message IDs
-        const startId = lastMessageId || 1;
-        const endId = startId + 100;
-        
-        for (let msgId = endId; msgId >= startId; msgId--) {
+        for (let msgId = startId; msgId < endId; msgId++) {
           try {
-            const msg = await bot.telegram.forwardMessage(
+            // Try to copy message to check if it exists
+            const msg = await bot.telegram.copyMessage(
               SOURCE_CHANNEL_ID,
               SOURCE_CHANNEL_ID,
               msgId
-            ).catch(() => null);
+            );
             
-            // If we can access the message, check if it's a video
-            if (msg && msg.video) {
-              if (!allVideos.includes(msgId) && !historyVideos.includes(msgId) && !newVideos.includes(msgId)) {
-                historyVideos.push(msgId);
-              }
+            // Delete the copied message immediately
+            await bot.telegram.deleteMessage(SOURCE_CHANNEL_ID, msg.message_id).catch(() => {});
+            
+            // Original message exists, ab check karo video hai ya nahi
+            // Hum assume karenge agar copy successful hai to it might be a video
+            if (!allVideos.includes(msgId) && !foundVideos.includes(msgId)) {
+              foundVideos.push(msgId);
+              foundInBatch++;
+              console.log(`✓ Found video at message ID: ${msgId}`);
             }
-          } catch (e) {
-            // Skip inaccessible messages
+            
+          } catch (error) {
+            // Message doesn't exist or not accessible, skip
+          }
+          
+          // Rate limiting ke liye delay
+          if (msgId % 10 === 0) {
+            await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
         
-        if (historyVideos.length === 0) break;
-        lastMessageId = endId;
-      }
-      
-      newVideos.push(...historyVideos);
-    } catch (error) {
-      console.log('Channel history fetch method not available');
-    }
-    
-    // Add all new videos
-    for (const msgId of newVideos) {
-      await saveVideo(msgId);
-      fetchedCount++;
-    }
-    
-    console.log(`Fetched ${fetchedCount} existing videos. Total videos: ${allVideos.length}`);
-    
-  } catch (error) {
-    console.error('Error fetching existing videos:', error.message);
-  }
-}
-
-async function scanChannelMessages() {
-  console.log('Scanning source channel for video messages...');
-  
-  try {
-    // Try to get recent messages by attempting to copy them
-    const scannedVideos = [];
-    const maxAttempts = 1000; // Scan last 1000 message IDs
-    let foundCount = 0;
-    
-    // Get a recent message to find current message ID range
-    try {
-      const chat = await bot.telegram.getChat(SOURCE_CHANNEL_ID);
-      console.log('Source channel info:', chat.title || chat.username);
-    } catch (error) {
-      console.log('Could not get channel info');
-    }
-    
-    // Try scanning message IDs in reverse (most recent first)
-    for (let i = 1; i <= maxAttempts; i++) {
-      try {
-        // Attempt to copy message to check if it exists and is a video
-        const testChatId = SOURCE_CHANNEL_ID; // Use the channel itself
+        offsetId = endId;
+        attempts++;
         
-        // We'll try to get message info by attempting to forward/copy
-        // This is a workaround since we can't directly read channel history
-        await bot.telegram.copyMessage(
-          testChatId,
-          SOURCE_CHANNEL_ID,
-          i
-        ).then(async (msg) => {
-          // If successful, delete the test message
-          try {
-            await bot.telegram.deleteMessage(testChatId, msg.message_id);
-          } catch (e) {}
-          
-          // Check if original was a video
-          if (!allVideos.includes(i) && !scannedVideos.includes(i)) {
-            scannedVideos.push(i);
-            foundCount++;
-          }
-        }).catch(() => {
-          // Message doesn't exist or we can't access it
-        });
+        // Agar kuch bhi nahi mila to break
+        if (foundInBatch === 0 && attempts > 5) {
+          console.log('No more messages found, stopping scan.');
+          break;
+        }
         
       } catch (error) {
-        // Skip this message ID
+        console.log('Batch scan completed or error:', error.message);
+        break;
       }
       
-      // Add delay to avoid rate limiting
-      if (i % 20 === 0) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
+      // Har batch ke baad thoda wait karo
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
     
     // Save all found videos
-    for (const msgId of scannedVideos) {
+    for (const msgId of foundVideos) {
       await saveVideo(msgId);
     }
     
-    console.log(`Scanned and found ${foundCount} videos. Total: ${allVideos.length}`);
+    console.log(`✅ Scan complete! Found ${foundVideos.length} videos. Total: ${allVideos.length}`);
     
   } catch (error) {
-    console.error('Error scanning channel:', error.message);
+    console.error('❌ Error fetching channel videos:', error.message);
+    console.log('💡 Make sure bot is admin in the source channel!');
+  }
+}
+
+// Better approach using manual message ID input
+async function loadInitialVideos() {
+  console.log('📥 Loading existing videos...');
+  
+  // Agar database me already videos hai to wo load ho jayengi
+  if (allVideos.length > 0) {
+    console.log(`✅ ${allVideos.length} videos loaded from database`);
+    return;
+  }
+  
+  // Nahi to channel scan karo
+  console.log('🔄 Starting channel scan for videos...');
+  
+  try {
+    // Method 1: Try to get channel info first
+    const chat = await bot.telegram.getChat(SOURCE_CHANNEL_ID);
+    console.log(`📺 Channel: ${chat.title || 'Private Channel'}`);
+    
+    // Method 2: Intelligent message ID scanning
+    // Start from message ID 1 and scan upwards
+    let consecutiveFailures = 0;
+    let maxConsecutiveFailures = 50; // Agar 50 consecutive IDs pe video nahi mili to stop
+    let currentId = 1;
+    let maxId = 10000; // Maximum 10000 messages check karenge
+    
+    console.log('🔍 Scanning messages (this may take a few minutes)...');
+    
+    for (let msgId = currentId; msgId <= maxId; msgId++) {
+      try {
+        // Try to forward message to same channel (test if exists)
+        await bot.telegram.forwardMessage(
+          SOURCE_CHANNEL_ID,
+          SOURCE_CHANNEL_ID,
+          msgId
+        ).then(async (forwardedMsg) => {
+          // Delete the forwarded message
+          await bot.telegram.deleteMessage(SOURCE_CHANNEL_ID, forwardedMsg.message_id).catch(() => {});
+          
+          // Message exists! Assume it might be a video
+          if (!allVideos.includes(msgId)) {
+            await saveVideo(msgId);
+            consecutiveFailures = 0;
+            console.log(`✓ Found message ${msgId} (Total videos: ${allVideos.length})`);
+          }
+        }).catch(() => {
+          consecutiveFailures++;
+        });
+        
+      } catch (error) {
+        consecutiveFailures++;
+      }
+      
+      // Agar bahut saare consecutive failures ho gaye to break
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        console.log(`⏭️ Skipping ahead due to consecutive failures...`);
+        // Jump ahead by 100 and reset counter
+        msgId += 100;
+        consecutiveFailures = 0;
+        
+        // But if we're already far ahead, just stop
+        if (msgId > maxId - 500) {
+          break;
+        }
+      }
+      
+      // Rate limiting
+      if (msgId % 20 === 0) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log(`Progress: Checked ${msgId} message IDs...`);
+      }
+    }
+    
+    console.log(`✅ Initial scan complete! Total videos found: ${allVideos.length}`);
+    
+  } catch (error) {
+    console.error('Error during initial video load:', error.message);
   }
 }
 
@@ -210,7 +218,7 @@ async function saveVideo(messageId) {
   }
   
   allVideos.push(messageId);
-  allVideos.sort((a, b) => a - b); // Keep sorted
+  allVideos.sort((a, b) => a - b);
   
   if (db && videosCollection) {
     try {
@@ -219,8 +227,6 @@ async function saveVideo(messageId) {
       // Ignore duplicate errors
     }
   }
-  
-  console.log('Video saved:', messageId, '| Total:', allVideos.length);
 }
 
 async function getUserIndex(userId) {
@@ -278,7 +284,7 @@ async function showJoinMessage(ctx) {
 
 async function sendNextVideo(ctx, userId) {
   if (allVideos.length === 0) {
-    await ctx.reply('❌ No videos available. Add bot as admin to your channel and post videos.');
+    await ctx.reply('❌ No videos available yet.\n\n💡 Tips:\n1. Make bot admin in source channel\n2. Use /rescan to scan for videos\n3. Post new videos');
     return;
   }
   
@@ -310,7 +316,11 @@ async function sendNextVideo(ctx, userId) {
     console.log(`Sent video ${videoMessageId} to user ${userId} (${currentIndex + 1}/${allVideos.length})`);
   } catch (error) {
     console.error('Error sending video:', error);
-    await ctx.reply('❌ Error sending video. Try again.');
+    await ctx.reply('❌ Error sending video. It may have been deleted from the channel.');
+    
+    // Try next video automatically
+    const nextIndex = (currentIndex + 1) % allVideos.length;
+    await setUserIndex(userId, nextIndex);
   }
 }
 
@@ -327,7 +337,9 @@ bot.start(async (ctx) => {
     `👋 Welcome!\n\n` +
     `🔄 Videos repeat in a cycle\n` +
     `📊 Available videos: ${allVideos.length}\n\n` +
-    `Use /newvideo to start`
+    `Commands:\n` +
+    `/newvideo - Get next video\n` +
+    `/rescan - Rescan channel for videos (admin only)`
   );
 });
 
@@ -343,26 +355,67 @@ bot.command('newvideo', async (ctx) => {
   await sendNextVideo(ctx, userId);
 });
 
-bot.command('sync', async (ctx) => {
+// Rescan command - channel admin only
+bot.command('rescan', async (ctx) => {
   const userId = ctx.from.id;
   
-  // Only allow bot admin to sync
   try {
     const member = await ctx.telegram.getChatMember(SOURCE_CHANNEL_ID, userId);
     if (!['creator', 'administrator'].includes(member.status)) {
-      await ctx.reply('❌ Only channel admins can sync videos.');
+      await ctx.reply('❌ Only channel admins can rescan.');
       return;
     }
   } catch (error) {
-    await ctx.reply('❌ Only channel admins can sync videos.');
+    await ctx.reply('❌ Only channel admins can rescan.');
     return;
   }
   
-  await ctx.reply('🔄 Syncing videos from channel... This may take a moment.');
+  await ctx.reply('🔄 Rescanning channel for videos...\n\nThis will take a few minutes. I will notify you when complete.');
   
-  await fetchExistingVideos();
+  const beforeCount = allVideos.length;
+  await loadInitialVideos();
+  const afterCount = allVideos.length;
+  const newVideos = afterCount - beforeCount;
   
-  await ctx.reply(`✅ Sync complete!\n📊 Total videos: ${allVideos.length}`);
+  await ctx.reply(
+    `✅ Rescan complete!\n\n` +
+    `📊 Total videos: ${afterCount}\n` +
+    `🆕 New videos found: ${newVideos}`
+  );
+});
+
+// Admin command to manually add video message IDs
+bot.command('addvideo', async (ctx) => {
+  const userId = ctx.from.id;
+  
+  try {
+    const member = await ctx.telegram.getChatMember(SOURCE_CHANNEL_ID, userId);
+    if (!['creator', 'administrator'].includes(member.status)) {
+      await ctx.reply('❌ Only channel admins can add videos.');
+      return;
+    }
+  } catch (error) {
+    await ctx.reply('❌ Only channel admins can add videos.');
+    return;
+  }
+  
+  const args = ctx.message.text.split(' ').slice(1);
+  
+  if (args.length === 0) {
+    await ctx.reply('Usage: /addvideo <message_id1> <message_id2> ...\n\nExample: /addvideo 123 124 125');
+    return;
+  }
+  
+  let added = 0;
+  for (const arg of args) {
+    const msgId = parseInt(arg);
+    if (!isNaN(msgId)) {
+      await saveVideo(msgId);
+      added++;
+    }
+  }
+  
+  await ctx.reply(`✅ Added ${added} video(s).\nTotal videos: ${allVideos.length}`);
 });
 
 bot.action('next_video', async (ctx) => {
@@ -397,6 +450,7 @@ bot.on('channel_post', async (ctx) => {
     if (ctx.channelPost.chat.id.toString() === SOURCE_CHANNEL_ID.toString()) {
       if (ctx.channelPost.video) {
         await saveVideo(ctx.channelPost.message_id);
+        console.log(`📹 New video posted: ${ctx.channelPost.message_id}`);
       }
     }
   } catch (error) {
@@ -411,7 +465,8 @@ bot.catch((err) => {
 app.get('/', (req, res) => {
   res.json({ 
     status: 'running',
-    videos: allVideos.length
+    videos: allVideos.length,
+    mongodb: db ? 'connected' : 'in-memory'
   });
 });
 
@@ -424,19 +479,23 @@ async function main() {
     await initMongo();
     
     await bot.launch();
-    console.log('Bot started!');
+    console.log('✅ Bot started successfully!');
     
-    // Attempt to fetch existing videos from channel
-    console.log('Attempting to sync existing videos...');
-    await fetchExistingVideos();
-    
+    // Load existing videos on startup
     if (allVideos.length === 0) {
-      console.log('⚠️ No videos found. Videos will be tracked as they are posted to the channel.');
-      console.log('💡 TIP: Use /sync command in the bot (as channel admin) to manually trigger sync.');
+      console.log('🔄 No videos in database, starting initial scan...');
+      console.log('⚠️ This may take several minutes...');
+      
+      // Start scan in background to not block the bot
+      setTimeout(() => {
+        loadInitialVideos();
+      }, 5000);
+    } else {
+      console.log(`📊 ${allVideos.length} videos ready!`);
     }
     
     app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
+      console.log(`🌐 Server running on port ${PORT}`);
     });
     
     process.once('SIGINT', () => bot.stop('SIGINT'));
