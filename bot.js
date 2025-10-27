@@ -21,6 +21,7 @@ let watchHistoryCollection = null;
 let channelVideosCollection = null;
 const inMemoryHistory = new Map();
 let channelVideos = [];
+let isIndexingComplete = false;
 
 app.use(express.json());
 
@@ -48,6 +49,139 @@ async function initMongo() {
   } catch (error) {
     console.error('MongoDB connection failed, using in-memory storage:', error);
     db = null;
+  }
+}
+
+async function indexAllChannelVideos() {
+  console.log('Starting to index all videos from channel...');
+  
+  try {
+    let offset = 0;
+    let totalVideosFound = 0;
+    const limit = 100;
+    
+    while (true) {
+      try {
+        const updates = await bot.telegram.getUpdates({
+          offset: offset,
+          limit: limit,
+          allowed_updates: ['channel_post']
+        });
+        
+        if (updates.length === 0) {
+          break;
+        }
+        
+        for (const update of updates) {
+          if (update.channel_post && 
+              update.channel_post.chat.id.toString() === SOURCE_CHANNEL_ID.toString() &&
+              update.channel_post.video) {
+            
+            const messageId = update.channel_post.message_id;
+            const date = update.channel_post.date;
+            
+            await addChannelVideo(messageId, date, true);
+            totalVideosFound++;
+          }
+          
+          offset = update.update_id + 1;
+        }
+        
+        if (updates.length < limit) {
+          break;
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+      } catch (error) {
+        console.error('Error during indexing iteration:', error);
+        break;
+      }
+    }
+    
+    console.log(`Indexing complete. Found ${totalVideosFound} videos from updates.`);
+    
+    let messageId = 1;
+    let consecutiveErrors = 0;
+    const maxConsecutiveErrors = 50;
+    let videosFoundByScanning = 0;
+    
+    console.log('Starting sequential message scanning...');
+    
+    while (consecutiveErrors < maxConsecutiveErrors) {
+      try {
+        const message = await bot.telegram.forwardMessage(
+          SOURCE_CHANNEL_ID,
+          SOURCE_CHANNEL_ID,
+          messageId
+        );
+        
+        if (message && message.video) {
+          await addChannelVideo(messageId, message.date, true);
+          videosFoundByScanning++;
+          consecutiveErrors = 0;
+        }
+        
+        await bot.telegram.deleteMessage(SOURCE_CHANNEL_ID, message.message_id);
+        
+      } catch (error) {
+        consecutiveErrors++;
+      }
+      
+      messageId++;
+      
+      if (messageId % 100 === 0) {
+        console.log(`Scanned up to message ${messageId}, found ${videosFoundByScanning} videos by scanning`);
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    
+    console.log(`Scanning complete. Found ${videosFoundByScanning} additional videos.`);
+    console.log(`Total videos in database: ${channelVideos.length}`);
+    
+  } catch (error) {
+    console.error('Error indexing channel videos:', error);
+  }
+  
+  isIndexingComplete = true;
+  console.log('Video indexing process completed');
+}
+
+async function addChannelVideo(messageId, date, skipLog = false) {
+  if (db && channelVideosCollection) {
+    try {
+      await channelVideosCollection.updateOne(
+        { messageId },
+        { $set: { messageId, date } },
+        { upsert: true }
+      );
+      
+      if (!channelVideos.includes(messageId)) {
+        channelVideos.push(messageId);
+        channelVideos.sort((a, b) => b - a);
+      }
+      
+      if (!skipLog) {
+        console.log('Video added to database. Total videos:', channelVideos.length);
+      }
+    } catch (error) {
+      if (!error.message.includes('duplicate key')) {
+        console.error('Error adding video to MongoDB:', error);
+      }
+      if (!channelVideos.includes(messageId)) {
+        channelVideos.push(messageId);
+        channelVideos.sort((a, b) => b - a);
+      }
+    }
+  } else {
+    if (!channelVideos.includes(messageId)) {
+      channelVideos.push(messageId);
+      channelVideos.sort((a, b) => b - a);
+      if (!skipLog) {
+        console.log('Video added to memory. Total videos:', channelVideos.length);
+      }
+    }
   }
 }
 
@@ -84,29 +218,41 @@ async function getWatchHistory(userId) {
   }
 }
 
-async function addChannelVideo(messageId, date) {
-  if (db && channelVideosCollection) {
+async function getNextVideoIndex(userId) {
+  if (db && watchHistoryCollection) {
     try {
-      await channelVideosCollection.updateOne(
-        { messageId },
-        { $set: { messageId, date } },
-        { upsert: true }
-      );
-      
-      const videos = await channelVideosCollection.find({}).sort({ date: -1 }).toArray();
-      channelVideos = videos.map(v => v.messageId);
-      console.log('Video added to database. Total videos:', channelVideos.length);
+      const record = await watchHistoryCollection.findOne({ userId });
+      return record && record.currentIndex !== undefined ? record.currentIndex : 0;
     } catch (error) {
-      console.error('Error adding video to MongoDB:', error);
-      if (!channelVideos.includes(messageId)) {
-        channelVideos.unshift(messageId);
-      }
+      console.error('Error reading index from MongoDB:', error);
+      return 0;
     }
   } else {
-    if (!channelVideos.includes(messageId)) {
-      channelVideos.unshift(messageId);
-      console.log('Video added to memory. Total videos:', channelVideos.length);
+    if (!inMemoryHistory.has(userId)) {
+      inMemoryHistory.set(userId, new Set());
     }
+    const userData = inMemoryHistory.get(userId);
+    return userData.currentIndex !== undefined ? userData.currentIndex : 0;
+  }
+}
+
+async function updateNextVideoIndex(userId, newIndex) {
+  if (db && watchHistoryCollection) {
+    try {
+      await watchHistoryCollection.updateOne(
+        { userId },
+        { $set: { currentIndex: newIndex } },
+        { upsert: true }
+      );
+    } catch (error) {
+      console.error('Error updating index in MongoDB:', error);
+    }
+  } else {
+    if (!inMemoryHistory.has(userId)) {
+      inMemoryHistory.set(userId, new Set());
+    }
+    const userData = inMemoryHistory.get(userId);
+    userData.currentIndex = newIndex;
   }
 }
 
@@ -132,23 +278,40 @@ async function showJoinPrompt(ctx) {
   );
 }
 
-async function getNextUnwatchedVideo(userId) {
-  const watchedVideos = await getWatchHistory(userId);
-  
-  for (const messageId of channelVideos) {
-    if (!watchedVideos.has(messageId)) {
-      return messageId;
-    }
+async function getNextVideo(userId) {
+  if (channelVideos.length === 0) {
+    return null;
   }
   
-  return null;
+  let currentIndex = await getNextVideoIndex(userId);
+  
+  if (currentIndex >= channelVideos.length) {
+    currentIndex = 0;
+  }
+  
+  const videoId = channelVideos[currentIndex];
+  
+  const nextIndex = (currentIndex + 1) % channelVideos.length;
+  await updateNextVideoIndex(userId, nextIndex);
+  
+  return videoId;
 }
 
 async function forwardNextVideo(ctx, userId) {
-  const nextVideoId = await getNextUnwatchedVideo(userId);
+  if (!isIndexingComplete) {
+    await ctx.reply('⏳ Bot is still indexing videos from the channel. Please wait a moment and try again...');
+    return;
+  }
+  
+  if (channelVideos.length === 0) {
+    await ctx.reply('📭 No videos available in the channel yet. Please check back later!');
+    return;
+  }
+  
+  const nextVideoId = await getNextVideo(userId);
   
   if (!nextVideoId) {
-    await ctx.reply('📭 No more videos available. You\'ve watched everything!');
+    await ctx.reply('❌ Unable to fetch video. Please try again.');
     return;
   }
   
@@ -186,8 +349,9 @@ bot.start(async (ctx) => {
   
   await ctx.reply(
     '👋 Welcome to the Video Bot!\n\n' +
-    'Use /newvideo to get your next unwatched video, or click the "Next Video" button under any forwarded video.\n\n' +
-    'The bot tracks your watch history so you never see the same video twice!'
+    '🔄 Videos are shown in a continuous cycle - once you finish all videos, they repeat from the beginning!\n\n' +
+    'Use /newvideo to get your next video, or click the "Next Video" button under any forwarded video.\n\n' +
+    `📊 Total videos available: ${channelVideos.length}`
   );
 });
 
@@ -244,7 +408,7 @@ bot.on('channel_post', async (ctx) => {
         const messageId = ctx.channelPost.message_id;
         const date = ctx.channelPost.date;
         await addChannelVideo(messageId, date);
-        console.log(`New video detected and added: ${messageId}`);
+        console.log(`New video detected and added: ${messageId}. Total: ${channelVideos.length}`);
       }
     }
   } catch (error) {
@@ -260,7 +424,8 @@ app.get('/', (req, res) => {
   res.json({ 
     status: 'Bot is running',
     videos: channelVideos.length,
-    storage: db ? 'MongoDB' : 'In-Memory'
+    storage: db ? 'MongoDB' : 'In-Memory',
+    indexing_complete: isIndexingComplete
   });
 });
 
@@ -268,7 +433,8 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    videos: channelVideos.length
+    videos: channelVideos.length,
+    indexing_complete: isIndexingComplete
   });
 });
 
@@ -280,6 +446,10 @@ async function main() {
     console.log('Starting bot in polling mode...');
     await bot.launch();
     console.log('Bot launched successfully in polling mode');
+    
+    setTimeout(() => {
+      indexAllChannelVideos();
+    }, 3000);
     
     app.listen(PORT, () => {
       console.log(`Health check server running on port ${PORT}`);
