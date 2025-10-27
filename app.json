@@ -13,7 +13,10 @@
   "formation": {
     "worker": {
       "quantity": 1,
-      "size": "Standard-2X"
+      "size": "standard-2x"
+    },
+    "web": {
+      "quantity": 0
     }
   },
   "env": {
