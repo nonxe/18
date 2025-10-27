@@ -1,0 +1,47 @@
+{
+  "name": "telegram-video-forwarder-bot",
+  "description": "Production-ready Telegram bot that forwards videos from a private channel with user watch history tracking",
+  "repository": "https://github.com/yourusername/telegram-video-bot",
+  "keywords": [
+    "telegram",
+    "bot",
+    "video",
+    "forwarder",
+    "nodejs"
+  ],
+  "stack": "heroku-24",
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "Standard-2X"
+    }
+  },
+  "env": {
+    "BOT_TOKEN": {
+      "description": "Your Telegram Bot Token from @BotFather",
+      "required": true
+    },
+    "SOURCE_CHANNEL_ID": {
+      "description": "Numeric ID of your private source channel (e.g., -100xxxxxxxxxx)",
+      "required": true
+    },
+    "FORCE_JOIN_CHANNEL_USERNAME": {
+      "description": "Username of the public channel users must join (without @, e.g., mychannel)",
+      "required": true
+    },
+    "MONGO_URL": {
+      "description": "MongoDB connection URL for persistent storage (optional, uses in-memory if not provided)",
+      "required": false
+    },
+    "HEROKU_APP_NAME": {
+      "description": "Your Heroku app name (auto-populated)",
+      "required": false
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
+  "addons": []
+}
