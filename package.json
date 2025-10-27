@@ -1,0 +1,25 @@
+{
+  "name": "telegram-video-forwarder-bot",
+  "version": "1.0.0",
+  "description": "Production-ready Telegram bot for forwarding videos with user watch history",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "video",
+    "forwarder"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "mongodb": "^6.10.0",
+    "express": "^4.21.1"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}
