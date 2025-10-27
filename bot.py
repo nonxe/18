@@ -6,8 +6,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const SOURCE_CHANNEL_ID = process.env.SOURCE_CHANNEL_ID;
 const FORCE_JOIN_CHANNEL_USERNAME = process.env.FORCE_JOIN_CHANNEL_USERNAME;
 const MONGO_URL = process.env.MONGO_URL;
-const PORT = process.env.PORT || 3000;
-const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN || process.env.HEROKU_APP_NAME;
+const PORT = process.env.PORT || 8443;
 
 if (!BOT_TOKEN || !SOURCE_CHANNEL_ID || !FORCE_JOIN_CHANNEL_USERNAME) {
   console.error('Missing required environment variables');
@@ -15,12 +14,15 @@ if (!BOT_TOKEN || !SOURCE_CHANNEL_ID || !FORCE_JOIN_CHANNEL_USERNAME) {
 }
 
 const bot = new Telegraf(BOT_TOKEN);
+const app = express();
 
 let db = null;
 let watchHistoryCollection = null;
 let channelVideosCollection = null;
 const inMemoryHistory = new Map();
 let channelVideos = [];
+
+app.use(express.json());
 
 async function initMongo() {
   if (!MONGO_URL) {
@@ -42,9 +44,9 @@ async function initMongo() {
     const videos = await channelVideosCollection.find({}).sort({ date: -1 }).toArray();
     channelVideos = videos.map(v => v.messageId);
     
-    console.log('MongoDB connected successfully');
+    console.log('MongoDB connected successfully, loaded', channelVideos.length, 'videos');
   } catch (error) {
-    console.error('MongoDB connection failed, falling back to in-memory storage:', error);
+    console.error('MongoDB connection failed, using in-memory storage:', error);
     db = null;
   }
 }
@@ -93,12 +95,17 @@ async function addChannelVideo(messageId, date) {
       
       const videos = await channelVideosCollection.find({}).sort({ date: -1 }).toArray();
       channelVideos = videos.map(v => v.messageId);
+      console.log('Video added to database. Total videos:', channelVideos.length);
     } catch (error) {
       console.error('Error adding video to MongoDB:', error);
+      if (!channelVideos.includes(messageId)) {
+        channelVideos.unshift(messageId);
+      }
     }
   } else {
     if (!channelVideos.includes(messageId)) {
       channelVideos.unshift(messageId);
+      console.log('Video added to memory. Total videos:', channelVideos.length);
     }
   }
 }
@@ -160,13 +167,15 @@ async function forwardNextVideo(ctx, userId) {
     );
     
     await saveWatchHistory(userId, nextVideoId);
+    console.log(`Forwarded video ${nextVideoId} to user ${userId}`);
   } catch (error) {
     console.error('Error forwarding video:', error);
-    await ctx.reply('❌ Error forwarding video. Please try again.');
+    await ctx.reply('❌ Error forwarding video. Please try again later.');
   }
 }
 
 bot.start(async (ctx) => {
+  console.log('Received /start from user:', ctx.from.id);
   const userId = ctx.from.id;
   
   const isMember = await checkUserMembership(ctx, userId);
@@ -183,6 +192,7 @@ bot.start(async (ctx) => {
 });
 
 bot.command('newvideo', async (ctx) => {
+  console.log('Received /newvideo from user:', ctx.from.id);
   const userId = ctx.from.id;
   
   const isMember = await checkUserMembership(ctx, userId);
@@ -195,6 +205,7 @@ bot.command('newvideo', async (ctx) => {
 });
 
 bot.action('next_video', async (ctx) => {
+  console.log('Received next_video action from user:', ctx.from.id);
   const userId = ctx.from.id;
   
   const isMember = await checkUserMembership(ctx, userId);
@@ -209,6 +220,7 @@ bot.action('next_video', async (ctx) => {
 });
 
 bot.action('retry_join', async (ctx) => {
+  console.log('Received retry_join action from user:', ctx.from.id);
   const userId = ctx.from.id;
   
   const isMember = await checkUserMembership(ctx, userId);
@@ -226,12 +238,13 @@ bot.action('retry_join', async (ctx) => {
 
 bot.on('channel_post', async (ctx) => {
   try {
+    console.log('Received channel post from:', ctx.channelPost.chat.id);
     if (ctx.channelPost.chat.id.toString() === SOURCE_CHANNEL_ID.toString()) {
       if (ctx.channelPost.video) {
         const messageId = ctx.channelPost.message_id;
         const date = ctx.channelPost.date;
         await addChannelVideo(messageId, date);
-        console.log(`New video added: ${messageId}`);
+        console.log(`New video detected and added: ${messageId}`);
       }
     }
   } catch (error) {
@@ -243,54 +256,49 @@ bot.catch((err, ctx) => {
   console.error('Bot error:', err);
 });
 
-const app = express();
-app.use(express.json());
-
 app.get('/', (req, res) => {
-  res.send('Bot is running');
+  res.json({ 
+    status: 'Bot is running',
+    videos: channelVideos.length,
+    storage: db ? 'MongoDB' : 'In-Memory'
+  });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    videos: channelVideos.length
+  });
 });
 
-async function startBot() {
+async function main() {
   try {
+    console.log('Initializing bot...');
     await initMongo();
     
-    if (WEBHOOK_DOMAIN) {
-      const webhookUrl = `https://${WEBHOOK_DOMAIN}.herokuapp.com/webhook`;
-      
-      app.use(bot.webhookCallback('/webhook'));
-      
-      app.listen(PORT, async () => {
-        console.log(`Server listening on port ${PORT}`);
-        
-        try {
-          await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-          await bot.telegram.setWebhook(webhookUrl);
-          console.log(`Webhook set to: ${webhookUrl}`);
-        } catch (error) {
-          console.error('Error setting webhook:', error);
-        }
-      });
-    } else {
-      console.log('No webhook domain, starting in polling mode');
-      await bot.launch();
-      
-      app.listen(PORT, () => {
-        console.log(`Health check server on port ${PORT}`);
-      });
-    }
+    console.log('Starting bot in polling mode...');
+    await bot.launch();
+    console.log('Bot launched successfully in polling mode');
     
-    console.log('Bot started successfully');
+    app.listen(PORT, () => {
+      console.log(`Health check server running on port ${PORT}`);
+    });
     
-    process.once('SIGINT', () => bot.stop('SIGINT'));
-    process.once('SIGTERM', () => bot.stop('SIGTERM'));
+    process.once('SIGINT', () => {
+      console.log('SIGINT received, stopping bot...');
+      bot.stop('SIGINT');
+    });
+    
+    process.once('SIGTERM', () => {
+      console.log('SIGTERM received, stopping bot...');
+      bot.stop('SIGTERM');
+    });
+    
   } catch (error) {
     console.error('Failed to start bot:', error);
     process.exit(1);
   }
 }
 
-startBot();
+main();
