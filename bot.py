@@ -1,11 +1,13 @@
 const { Telegraf, Markup } = require('telegraf');
 const { MongoClient } = require('mongodb');
+const express = require('express');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SOURCE_CHANNEL_ID = process.env.SOURCE_CHANNEL_ID;
 const FORCE_JOIN_CHANNEL_USERNAME = process.env.FORCE_JOIN_CHANNEL_USERNAME;
 const MONGO_URL = process.env.MONGO_URL;
 const PORT = process.env.PORT || 3000;
+const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN || process.env.HEROKU_APP_NAME;
 
 if (!BOT_TOKEN || !SOURCE_CHANNEL_ID || !FORCE_JOIN_CHANNEL_USERNAME) {
   console.error('Missing required environment variables');
@@ -144,7 +146,7 @@ async function forwardNextVideo(ctx, userId) {
   }
   
   try {
-    const forwardedMessage = await ctx.telegram.copyMessage(
+    await ctx.telegram.copyMessage(
       ctx.chat.id,
       SOURCE_CHANNEL_ID,
       nextVideoId,
@@ -241,16 +243,45 @@ bot.catch((err, ctx) => {
   console.error('Bot error:', err);
 });
 
+const app = express();
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.send('Bot is running');
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
 async function startBot() {
   try {
     await initMongo();
     
-    await bot.launch({
-      webhook: {
-        domain: `https://${process.env.HEROKU_APP_NAME}.herokuapp.com`,
-        port: PORT
-      }
-    });
+    if (WEBHOOK_DOMAIN) {
+      const webhookUrl = `https://${WEBHOOK_DOMAIN}.herokuapp.com/webhook`;
+      
+      app.use(bot.webhookCallback('/webhook'));
+      
+      app.listen(PORT, async () => {
+        console.log(`Server listening on port ${PORT}`);
+        
+        try {
+          await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+          await bot.telegram.setWebhook(webhookUrl);
+          console.log(`Webhook set to: ${webhookUrl}`);
+        } catch (error) {
+          console.error('Error setting webhook:', error);
+        }
+      });
+    } else {
+      console.log('No webhook domain, starting in polling mode');
+      await bot.launch();
+      
+      app.listen(PORT, () => {
+        console.log(`Health check server on port ${PORT}`);
+      });
+    }
     
     console.log('Bot started successfully');
     
@@ -263,14 +294,3 @@ async function startBot() {
 }
 
 startBot();
-
-const express = require('express');
-const app = express();
-
-app.get('/', (req, res) => {
-  res.send('Bot is running');
-});
-
-app.listen(PORT, () => {
-  console.log(`Health check server running on port ${PORT}`);
-});
