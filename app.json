@@ -13,7 +13,7 @@
   "formation": {
     "worker": {
       "quantity": 1,
-      "size": "standard-2x"
+      "size": "eco"
     }
   },
   "env": {
