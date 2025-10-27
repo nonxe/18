@@ -14,9 +14,6 @@
     "worker": {
       "quantity": 1,
       "size": "standard-2x"
-    },
-    "web": {
-      "quantity": 0
     }
   },
   "env": {
